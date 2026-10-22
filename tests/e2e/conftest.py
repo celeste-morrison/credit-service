@@ -1,3 +1,5 @@
+"""Fixtures for end-to-end tests against the running docker compose stack."""
+
 import os
 from collections.abc import Iterator
 
@@ -8,6 +10,7 @@ from app.config import get_settings
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark every test in this directory as ``e2e``."""
     for item in items:
         if "/e2e/" in str(item.path):
             item.add_marker(pytest.mark.e2e)

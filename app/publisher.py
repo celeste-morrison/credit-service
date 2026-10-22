@@ -1,24 +1,31 @@
+"""Enqueueing abstraction, so the API can be tested without a broker."""
+
 from typing import Protocol
 
 
 class CreditPublisher(Protocol):
+    """Something that can hand a credit to the worker."""
+
     def publish(self, credit_id: str) -> None:
-        """Enqueue a credit for the worker. Raises if the broker can't accept it."""
+        """Enqueue a credit.
+
+        Args:
+            credit_id: The credit to apply.
+
+        Raises:
+            Exception: The credit could not be enqueued.
+        """
 
 
 class CeleryCreditPublisher:
-    def publish(self, credit_id: str) -> None:
-        from app.worker.tasks import apply_credit
+    """Publishes credits to the Celery queue."""
 
-        # The credit id doubles as the Celery task id: one id to poll, log, and dedupe.
-        apply_credit.apply_async(
-            args=(credit_id,),
-            task_id=credit_id,
-            retry=True,
-            retry_policy={
-                "max_retries": 3,
-                "interval_start": 0,
-                "interval_step": 0.2,
-                "interval_max": 1,
-            },
-        )
+    def publish(self, credit_id: str) -> None:
+        """Enqueue a credit on the Celery broker.
+
+        Args:
+            credit_id: The credit to apply.
+        """
+        from app.worker.tasks import enqueue
+
+        enqueue(credit_id)

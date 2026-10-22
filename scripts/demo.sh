@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Walks through the credit flow against a running stack (`make up`).
 set -euo pipefail
 
 API="${API_URL:-http://localhost:${API_PORT:-8000}}"

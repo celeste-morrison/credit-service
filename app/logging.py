@@ -1,4 +1,8 @@
-"""JSON logs on stdout. Bound context (request_id, credit_id) rides along on every line."""
+"""JSON logging on stdout.
+
+Context bound with ``structlog.contextvars`` (``request_id`` in the API,
+``credit_id`` in the worker) is added to every log line.
+"""
 
 import logging
 import sys
@@ -7,6 +11,11 @@ import structlog
 
 
 def configure_logging(level: str = "INFO") -> None:
+    """Configure stdlib logging and structlog to emit JSON lines.
+
+    Args:
+        level: Minimum log level name, such as ``"INFO"``.
+    """
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=level.upper())
     structlog.configure(
         processors=[

@@ -1,6 +1,5 @@
 .DEFAULT_GOAL := help
 
-# Load local overrides (ports, URLs) for tests and scripts.
 -include .env
 export
 

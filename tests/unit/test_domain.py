@@ -1,3 +1,5 @@
+"""Request validation and money formatting."""
+
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -25,7 +27,26 @@ def test_accepts_valid_amounts(amount: Any, expected: Decimal) -> None:
 
 @pytest.mark.parametrize(
     "amount",
-    [0, "0.00", -5, "10.001", 0.005, "1000000.01", "abc", None, "NaN", "Infinity", True],
+    [
+        0,
+        "0.00",
+        -5,
+        "10.001",
+        0.005,
+        "1000000.01",
+        "abc",
+        None,
+        "NaN",
+        "Infinity",
+        True,
+        "1_000",
+        "\u0661\u0660\u0660",
+        " 5 ",
+        "1E+6",
+        "-5",
+        "+5",
+        ".5",
+    ],
 )
 def test_rejects_invalid_amounts(amount: Any) -> None:
     with pytest.raises(ValidationError):
