@@ -4,6 +4,7 @@ set -euo pipefail
 API="${API_URL:-http://localhost:${API_PORT:-8000}}"
 USER_ID="u_demo_$RANDOM"
 KEY="${CREDITS_API_KEYS%%,*}"
+KEY="${KEY##*:}"
 KEY="${KEY:-dev-local-key}"
 
 pretty() { python3 -m json.tool; }

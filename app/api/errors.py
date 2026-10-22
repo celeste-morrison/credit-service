@@ -29,13 +29,21 @@ class ApiError(Exception):
         status_code: HTTP status.
         code: Machine-readable error code.
         message: Human-readable message.
+        headers: Extra response headers, such as ``Retry-After``.
     """
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.headers = headers or {}
 
 
 def error_response(status_code: int, code: str, message: str, details: Any = None) -> JSONResponse:
@@ -57,7 +65,9 @@ def error_response(status_code: int, code: str, message: str, details: Any = Non
 
 
 async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
-    return error_response(exc.status_code, exc.code, exc.message)
+    response = error_response(exc.status_code, exc.code, exc.message)
+    response.headers.update(exc.headers)
+    return response
 
 
 async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

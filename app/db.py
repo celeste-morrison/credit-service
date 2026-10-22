@@ -22,19 +22,25 @@ INDEXES: dict[str, list[IndexModel]] = {
     USERS: [IndexModel([("user_id", ASCENDING)], unique=True, name="user_id_unique")],
     CREDITS: [
         IndexModel(
-            [("user_id", ASCENDING), ("idempotency_key", ASCENDING)],
+            [("client_id", ASCENDING), ("user_id", ASCENDING), ("idempotency_key", ASCENDING)],
             unique=True,
             partialFilterExpression={"idempotency_key": {"$exists": True}},
-            name="user_idempotency_key_unique",
+            name="client_user_idempotency_key_unique",
+        ),
+        IndexModel(
+            [("created_at", ASCENDING)],
+            partialFilterExpression={"idempotency_key": {"$exists": True}},
+            name="idempotency_key_created",
         ),
         IndexModel([("status", ASCENDING), ("created_at", ASCENDING)], name="status_created"),
     ],
 }
 """Indexes per collection.
 
-Idempotency keys are unique per user, so two callers that happen to choose the
-same key for different users never collide. ``status_created`` serves the
-reconciliation scan for stale pending credits.
+Idempotency keys are unique per API client and user, so two callers that happen
+to choose the same key never collide. ``idempotency_key_created`` serves the job
+that expires old keys, and ``status_created`` serves the reconciliation scan for
+stale pending credits.
 """
 
 

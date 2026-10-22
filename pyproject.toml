@@ -52,6 +52,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 addopts = "-m 'not e2e'"
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]
 markers = [
     "integration: requires MongoDB (and Redis) from docker compose",
     "e2e: requires the full docker compose stack",

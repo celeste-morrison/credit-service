@@ -19,16 +19,30 @@ Settings worth knowing:
 
     ``worker_redirect_stdouts``: off, so the JSON logs reach stdout unwrapped.
 
-    ``beat_schedule``: runs the reconciliation job that re-enqueues credits
-    stuck in ``pending``.
+    ``beat_schedule``: every minute, re-enqueue credits stuck in ``pending``;
+    every hour, release idempotency keys past their TTL.
+
+Logging: Celery's own logging setup is replaced by ``configure_logging`` via
+the ``setup_logging`` signal, so worker and beat output is JSON like the API's.
 """
 
+from typing import Any
+
 from celery import Celery
+from celery.signals import setup_logging
 
 from app.config import get_settings
 from app.logging import configure_logging
 
 settings = get_settings()
+
+
+@setup_logging.connect
+def _configure_logging(**_: Any) -> None:
+    """Use the service's JSON logging instead of Celery's default handlers."""
+    configure_logging(settings.log_level)
+
+
 configure_logging(settings.log_level)
 
 celery = Celery("credits", broker=settings.redis_url, include=["app.worker.tasks"])
@@ -50,10 +64,15 @@ celery.conf.update(
     },
     broker_connection_retry_on_startup=True,
     worker_redirect_stdouts=False,
+    worker_hijack_root_logger=False,
     beat_schedule={
         "reconcile-pending-credits": {
             "task": "credits.reconcile",
             "schedule": settings.reconcile_interval_s,
+        },
+        "expire-idempotency-keys": {
+            "task": "credits.expire_idempotency_keys",
+            "schedule": 3600,
         },
     },
 )

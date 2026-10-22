@@ -5,8 +5,9 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
+from app.config import Settings
 from app.domain import CreditRequest, CreditStatus, CreditView, UserStatus, UserView
 
 
@@ -99,3 +100,9 @@ def test_money_serializes_as_two_decimal_string() -> None:
         created_at=datetime.now(UTC),
     )
     assert credit.model_dump(mode="json")["amount"] == "0.30"
+
+
+def test_api_keys_parse_into_client_names() -> None:
+    settings = Settings(api_keys=SecretStr(" billing:k1, payouts:k2,k3,, "))
+
+    assert settings.api_clients() == {"k1": "billing", "k2": "payouts", "k3": "default"}

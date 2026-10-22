@@ -31,6 +31,9 @@ log = structlog.get_logger(__name__)
 PROCESSING_ERROR = "processing_error"
 """Error code stored on credits that failed for a non-transient reason."""
 
+REQUEST_ID_HEADER = "request_id"
+"""Celery message header carrying the API request id."""
+
 RECONCILE_BATCH = 500
 """Maximum credits re-enqueued per reconciliation run."""
 
@@ -83,6 +86,8 @@ def enqueue(credit_id: str) -> None:
     """Publish a credit for the worker.
 
     The credit id doubles as the Celery task id: one id to poll, log and dedupe.
+    The current request id, if any, travels in the message headers so API and
+    worker log lines for one credit share it.
 
     Args:
         credit_id: The credit to apply.
@@ -90,12 +95,24 @@ def enqueue(credit_id: str) -> None:
     Raises:
         kombu.exceptions.OperationalError: The broker is unreachable.
     """
+    request_id = structlog.contextvars.get_contextvars().get("request_id")
     apply_credit.apply_async(
         args=(credit_id,),
         task_id=credit_id,
+        headers={REQUEST_ID_HEADER: request_id} if request_id else {},
         retry=True,
         retry_policy={"max_retries": 3, "interval_start": 0, "interval_step": 0.2},
     )
+
+
+def _header(task: Task, name: str) -> str | None:
+    """Read a custom message header from the task request.
+
+    Celery exposes custom headers as request attributes on a real worker and
+    under ``request.headers`` when a task runs eagerly.
+    """
+    value = getattr(task.request, name, None) or (task.request.headers or {}).get(name)
+    return str(value) if value else None
 
 
 class CreditTask(Task):
@@ -138,6 +155,9 @@ def apply_credit(self: CreditTask, credit_id: str) -> str:
     """
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(credit_id=credit_id)
+    request_id = _header(self, REQUEST_ID_HEADER)
+    if request_id:
+        structlog.contextvars.bind_contextvars(request_id=request_id)
     settings = get_settings()
     try:
         result = get_repository().apply_credit(credit_id)
@@ -176,3 +196,18 @@ def reconcile_pending() -> int:
     if stale:
         log.warning("credit.reconciled", count=len(stale))
     return len(stale)
+
+
+@celery.task(name="credits.expire_idempotency_keys")
+def expire_idempotency_keys() -> int:
+    """Release idempotency keys older than the configured TTL.
+
+    Returns:
+        Number of credits whose key was released.
+    """
+    settings = get_settings()
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.idempotency_key_ttl_s)
+    released = get_repository().expire_idempotency_keys(cutoff)
+    if released:
+        log.info("idempotency.keys_expired", count=released)
+    return released

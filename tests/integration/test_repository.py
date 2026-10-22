@@ -254,3 +254,24 @@ async def test_decimal_precision_is_exact(
     user = await fetch_user(api_repo)
     assert user.balance == Decimal("0.30")
     assert user.model_dump(mode="json")["balance"] == "0.30"
+
+
+async def test_expire_idempotency_keys_releases_only_old_keys(
+    api_repo: AsyncCreditRepository,
+    worker_repo: CreditRepository,
+    sync_client: MongoClient[Doc],
+    db_name: str,
+) -> None:
+    old, _ = await api_repo.create_pending_credit(credit_request(), idempotency_key="old")
+    await api_repo.create_pending_credit(credit_request(), idempotency_key="new")
+    sync_client[db_name][CREDITS].update_one(
+        {"_id": old.task_id}, {"$set": {"created_at": datetime.now(UTC) - timedelta(days=2)}}
+    )
+
+    assert worker_repo.expire_idempotency_keys(datetime.now(UTC) - timedelta(days=1)) == 1
+
+    reused, is_new = await api_repo.create_pending_credit(credit_request(), idempotency_key="old")
+    assert is_new
+    assert reused.task_id != old.task_id
+    _, replayed_new = await api_repo.create_pending_credit(credit_request(), idempotency_key="new")
+    assert not replayed_new

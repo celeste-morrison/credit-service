@@ -33,6 +33,7 @@ from pymongo.asynchronous.client_session import AsyncClientSession
 from pymongo.client_session import ClientSession
 from pymongo.errors import DuplicateKeyError
 
+from app.config import DEFAULT_CLIENT
 from app.db import CREDITS, USERS, Doc
 from app.domain import CreditRequest, CreditStatus, CreditView, UserStatus, UserView
 
@@ -161,13 +162,18 @@ class AsyncCreditRepository:
         self._timeout_s = timeout_s
 
     async def create_pending_credit(
-        self, req: CreditRequest, idempotency_key: str | None = None
+        self,
+        req: CreditRequest,
+        *,
+        client_id: str = DEFAULT_CLIENT,
+        idempotency_key: str | None = None,
     ) -> tuple[CreditView, bool]:
         """Record a pending credit and mark the user ``processing``.
 
         Args:
             req: The validated credit request.
-            idempotency_key: Optional client key, unique per user.
+            client_id: The API client issuing the credit.
+            idempotency_key: Optional client key, unique per client and user.
 
         Returns:
             ``(credit, created)``. ``created`` is False when an earlier request
@@ -181,6 +187,7 @@ class AsyncCreditRepository:
         credit: Doc = {
             "_id": str(uuid4()),
             "user_id": req.user_id,
+            "client_id": client_id,
             "amount": Decimal128(req.amount),
             "status": CreditStatus.PENDING.value,
             "created_at": now,
@@ -207,7 +214,7 @@ class AsyncCreditRepository:
                 return to_credit_view(credit), True
             except DuplicateKeyError as err:
                 if idempotency_key is not None and _is_idempotency_conflict(err):
-                    return await self._existing_for_key(idempotency_key, req), False
+                    return await self._existing_for_key(client_id, idempotency_key, req), False
                 if attempt == UPSERT_ATTEMPTS:
                     raise
         raise AssertionError("unreachable")
@@ -275,13 +282,15 @@ class AsyncCreditRepository:
             doc = await self._users.find_one({"user_id": user_id})
         return to_user_view(doc) if doc else None
 
-    async def _existing_for_key(self, key: str, req: CreditRequest) -> CreditView:
+    async def _existing_for_key(self, client_id: str, key: str, req: CreditRequest) -> CreditView:
         """Return the credit already stored under ``key`` if it matches ``req``.
 
         Raises:
             IdempotencyConflictError: The stored credit has a different amount.
         """
-        doc = await self._credits.find_one({"user_id": req.user_id, "idempotency_key": key})
+        doc = await self._credits.find_one(
+            {"client_id": client_id, "user_id": req.user_id, "idempotency_key": key}
+        )
         if doc is None or doc["amount"].to_decimal() != req.amount:
             raise IdempotencyConflictError(key)
         return to_credit_view(doc)
@@ -370,6 +379,29 @@ class CreditRepository:
             return True
 
         return self._run(txn)
+
+    def expire_idempotency_keys(self, older_than: datetime) -> int:
+        """Release idempotency keys on credits created before ``older_than``.
+
+        Keys are honoured for a fixed window. Removing them afterwards keeps the
+        unique index bounded and lets a client reuse a key after the window,
+        while the credit itself stays in the ledger.
+
+        Args:
+            older_than: Creation-time cutoff.
+
+        Returns:
+            Number of credits whose key was released.
+
+        Raises:
+            pymongo.errors.PyMongoError: MongoDB failed or timed out.
+        """
+        with pymongo.timeout(self._timeout_s):
+            result = self._credits.update_many(
+                {"idempotency_key": {"$exists": True}, "created_at": {"$lt": older_than}},
+                {"$unset": {"idempotency_key": ""}},
+            )
+        return result.modified_count
 
     def find_stale_pending(self, older_than: datetime, limit: int) -> list[str]:
         """List credits still pending since before ``older_than``.

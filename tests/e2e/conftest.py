@@ -20,7 +20,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 def api() -> Iterator[httpx.Client]:
     """Client for the API running in docker compose (`make up`)."""
     base_url = os.environ.get("API_URL", f"http://localhost:{os.environ.get('API_PORT', '8000')}")
-    api_key = min(get_settings().api_key_set() or {"dev-local-key"})
+    api_key = min(get_settings().api_clients() or {"dev-local-key": "default"})
     with httpx.Client(base_url=base_url, headers={"X-API-Key": api_key}, timeout=5) as client:
         client.get("/readyz").raise_for_status()
         yield client

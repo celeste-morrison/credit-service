@@ -11,7 +11,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, Response
 from fastapi.responses import JSONResponse
 
-from app.api.deps import get_publisher, get_readiness, get_repository, require_api_key
+from app.api.deps import ClientId, enforce_rate_limit, get_publisher, get_readiness, get_repository
 from app.api.errors import ApiError
 from app.api.health import Readiness
 from app.domain import CreditAccepted, CreditRequest, CreditView, UserId, UserView
@@ -20,7 +20,7 @@ from app.repository import AsyncCreditRepository, IdempotencyConflictError
 
 log = structlog.get_logger(__name__)
 
-router = APIRouter(dependencies=[Depends(require_api_key)])
+router = APIRouter(dependencies=[Depends(enforce_rate_limit)])
 probes = APIRouter()
 
 Repo = Annotated[AsyncCreditRepository, Depends(get_repository)]
@@ -33,6 +33,7 @@ async def create_credit(
     response: Response,
     repo: Repo,
     publisher: Publisher,
+    client_id: ClientId,
     idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
 ) -> CreditAccepted:
     """Accept a credit for asynchronous processing.
@@ -40,7 +41,7 @@ async def create_credit(
     The credit is recorded as pending and the user marked ``processing`` before
     the task is enqueued. Poll the ``Location`` header for progress.
 
-    Replaying an ``Idempotency-Key`` for the same user and amount returns the
+    Replaying an ``Idempotency-Key`` for the same client, user and amount returns the
     original credit and its current status without enqueueing again. If the
     original could not be enqueued (503), the key is freed and the retry creates
     a new credit.
@@ -50,7 +51,8 @@ async def create_credit(
         response: Used to set the ``Location`` header.
         repo: The API-side repository.
         publisher: Hands new credits to the worker.
-        idempotency_key: Optional ``Idempotency-Key`` header, unique per user.
+        client_id: The authenticated API client, recorded on the credit.
+        idempotency_key: Optional ``Idempotency-Key`` header, unique per client and user.
 
     Returns:
         The credit's task id and current status.
@@ -59,7 +61,9 @@ async def create_credit(
         ApiError: 409 on an idempotency conflict, 503 if the queue is down.
     """
     try:
-        credit, created = await repo.create_pending_credit(body, idempotency_key)
+        credit, created = await repo.create_pending_credit(
+            body, client_id=client_id, idempotency_key=idempotency_key
+        )
     except IdempotencyConflictError as exc:
         raise ApiError(
             409, "idempotency_conflict", "Idempotency-Key was already used with a different amount"

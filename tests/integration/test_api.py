@@ -2,21 +2,33 @@
 
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pymongo import MongoClient
+from redis.asyncio import Redis
 
 from app.api.health import Readiness
 from app.api.main import create_app
-from app.config import get_settings
+from app.api.ratelimit import RateLimiter
+from app.config import Settings, get_settings
 from app.db import CREDITS, Doc
 from app.repository import AsyncCreditRepository, CreditRepository
 from tests.integration.helpers import fetch_user
 
 API_KEY = "test-key"
+OTHER_KEY = "other-client-key"
+
+
+class AllowAll:
+    """Rate limiter stand-in that never limits."""
+
+    async def retry_after(self, client_id: str) -> int | None:
+        """Allow every request."""
+        return None
 
 
 class FakePublisher:
@@ -54,7 +66,8 @@ def app(api_repo: AsyncCreditRepository, publisher: FakePublisher) -> FastAPI:
     app.state.repository = api_repo
     app.state.publisher = publisher
     app.state.readiness = Readiness({"mongo": _ok, "redis": _ok}, ttl_s=0)
-    app.state.api_keys = frozenset({API_KEY, "rotated-key"})
+    app.state.api_clients = {API_KEY: "billing", "rotated-key": "billing", OTHER_KEY: "payouts"}
+    app.state.rate_limiter = AllowAll()
     return app
 
 
@@ -243,7 +256,7 @@ async def test_any_configured_key_is_accepted(client: httpx.AsyncClient) -> None
 
 
 async def test_no_configured_keys_fails_closed(client: httpx.AsyncClient, app: FastAPI) -> None:
-    app.state.api_keys = frozenset()
+    app.state.api_clients = {}
     assert (await client.get("/users/nobody")).status_code == 401
 
 
@@ -312,4 +325,65 @@ def test_lifespan_creates_indexes_and_reports_ready(
     assert resp.status_code == 200, resp.json()
     assert resp.json()["checks"] == {"mongo": "ok", "redis": "ok"}
     indexes = sync_client[db_name][CREDITS].index_information()
-    assert "user_idempotency_key_unique" in indexes
+    assert "client_user_idempotency_key_unique" in indexes
+
+
+async def test_credit_records_the_issuing_client(
+    client: httpx.AsyncClient, sync_client: MongoClient[Doc], db_name: str
+) -> None:
+    task_id = (await post_credit(client)).json()["task_id"]
+
+    stored = sync_client[db_name][CREDITS].find_one({"_id": task_id})
+    assert stored is not None
+    assert stored["client_id"] == "billing"
+
+
+async def test_idempotency_keys_are_scoped_per_client(
+    client: httpx.AsyncClient, publisher: FakePublisher
+) -> None:
+    first = await post_credit(client, **{"Idempotency-Key": "abc"})
+    other = await post_credit(client, **{"Idempotency-Key": "abc", "X-API-Key": OTHER_KEY})
+
+    assert first.json()["task_id"] != other.json()["task_id"]
+    assert len(publisher.published) == 2
+
+
+async def test_rate_limit_returns_429_with_retry_after(
+    client: httpx.AsyncClient, app: FastAPI, settings: Settings
+) -> None:
+    redis = Redis.from_url(settings.redis_url)
+    app.state.api_clients = {API_KEY: f"limited-{uuid4().hex}"}
+    app.state.rate_limiter = RateLimiter(redis, limit=2)
+    try:
+        statuses = [(await client.get("/users/nobody")).status_code for _ in range(3)]
+        limited = await client.get("/users/nobody")
+    finally:
+        await redis.aclose()
+
+    assert statuses == [404, 404, 429]
+    assert limited.json()["error"]["code"] == "rate_limited"
+    assert 1 <= int(limited.headers["retry-after"]) <= 60
+
+
+async def test_rate_limiter_allows_requests_when_redis_is_down() -> None:
+    redis = Redis.from_url("redis://127.0.0.1:1/0", socket_connect_timeout=0.2)
+    try:
+        assert await RateLimiter(redis, limit=0).retry_after("anyone") is None
+    finally:
+        await redis.aclose()
+
+
+async def test_api_docs_are_disabled_by_default(anon: httpx.AsyncClient) -> None:
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert (await anon.get(path)).status_code == 404
+
+
+def test_api_docs_can_be_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CREDITS_DOCS_ENABLED", "true")
+    get_settings.cache_clear()
+    try:
+        app = create_app()
+    finally:
+        get_settings.cache_clear()
+
+    assert app.openapi_url == "/openapi.json"

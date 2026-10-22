@@ -3,11 +3,13 @@
 import hmac
 from typing import Annotated
 
+import structlog
 from fastapi import Depends, Request
 from fastapi.security import APIKeyHeader
 
 from app.api.errors import ApiError
 from app.api.health import Readiness
+from app.api.ratelimit import RateLimiter
 from app.publisher import CreditPublisher
 from app.repository import AsyncCreditRepository
 
@@ -56,20 +58,54 @@ def get_readiness(request: Request) -> Readiness:
 def require_api_key(
     request: Request,
     x_api_key: Annotated[str | None, Depends(_api_key_header)],
-) -> None:
-    """Reject the request unless it carries a configured API key.
+) -> str:
+    """Authenticate the caller by API key.
 
-    Keys are compared in constant time. With no keys configured every request
-    is rejected.
+    Keys are compared in constant time, and every configured key is compared
+    so the time taken does not reveal which one matched. With no keys
+    configured every request is rejected.
 
     Args:
         request: The incoming request.
         x_api_key: Value of the ``X-API-Key`` header.
 
+    Returns:
+        The name of the client the key belongs to.
+
     Raises:
         ApiError: 401 if the key is missing or unknown.
     """
-    keys: frozenset[str] = request.app.state.api_keys
+    clients: dict[str, str] = request.app.state.api_clients
     supplied = (x_api_key or "").encode()
-    if not supplied or not any(hmac.compare_digest(supplied, key.encode()) for key in keys):
+    client_id = None
+    for key, client in clients.items():
+        if hmac.compare_digest(supplied, key.encode()):
+            client_id = client
+    if not supplied or client_id is None:
         raise ApiError(401, "unauthorized", "Missing or invalid X-API-Key")
+    structlog.contextvars.bind_contextvars(client_id=client_id)
+    return client_id
+
+
+ClientId = Annotated[str, Depends(require_api_key)]
+
+
+async def enforce_rate_limit(request: Request, client_id: ClientId) -> None:
+    """Reject the request if its client is over its per-minute limit.
+
+    Args:
+        request: The incoming request.
+        client_id: The authenticated client.
+
+    Raises:
+        ApiError: 429 with ``Retry-After`` when the limit is exceeded.
+    """
+    limiter: RateLimiter = request.app.state.rate_limiter
+    retry_after = await limiter.retry_after(client_id)
+    if retry_after is not None:
+        raise ApiError(
+            429,
+            "rate_limited",
+            "Too many requests",
+            headers={"Retry-After": str(retry_after)},
+        )

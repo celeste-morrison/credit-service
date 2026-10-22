@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+import structlog
 from pymongo import MongoClient
 from pymongo.errors import AutoReconnect, OperationFailure
 
@@ -154,3 +155,50 @@ async def test_reconcile_reenqueues_only_stale_pending_credits(
 )
 def test_is_transient(error: Exception, transient: bool) -> None:
     assert tasks.is_transient(error) is transient
+
+
+def test_enqueue_forwards_the_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: dict[str, object] = {}
+    monkeypatch.setattr(tasks.apply_credit, "apply_async", lambda **kwargs: sent.update(kwargs))
+    structlog.contextvars.bind_contextvars(request_id="req-42")
+    try:
+        tasks.enqueue("credit-1")
+    finally:
+        structlog.contextvars.clear_contextvars()
+
+    assert sent["task_id"] == "credit-1"
+    assert sent["headers"] == {"request_id": "req-42"}
+
+
+async def test_task_binds_request_id_from_headers(
+    api_repo: AsyncCreditRepository,
+    worker_repo: CreditRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_repository(monkeypatch, worker_repo)
+    seen: list[object] = []
+    monkeypatch.setattr(
+        tasks.log, "info", lambda *a, **k: seen.append(structlog.contextvars.get_contextvars())
+    )
+    credit_id = await pending_credit(api_repo)
+
+    tasks.apply_credit.apply(args=(credit_id,), headers={"request_id": "req-42"})
+
+    assert seen == [{"credit_id": credit_id, "request_id": "req-42"}]
+
+
+def test_expire_task_uses_configured_ttl(
+    worker_repo: CreditRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cutoffs: list[datetime] = []
+
+    def record(cutoff: datetime) -> int:
+        cutoffs.append(cutoff)
+        return 3
+
+    monkeypatch.setattr(worker_repo, "expire_idempotency_keys", record)
+    use_repository(monkeypatch, worker_repo)
+
+    assert tasks.expire_idempotency_keys() == 3
+    age = datetime.now(UTC) - cutoffs[0]
+    assert timedelta(hours=23, minutes=59) < age < timedelta(hours=24, minutes=1)
