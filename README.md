@@ -9,6 +9,7 @@ flowchart LR
     A -- "enqueue credit_id" --> R[(Redis)]
     R --> W[Celery worker]
     W -- "txn: credit=applied,<br/>balance += amount" --> M
+    B[Celery beat] -- "every 60s: re-enqueue<br/>stale pending credits" --> R
     C -- "GET /credits/{id}<br/>GET /users/{id}" --> A
 ```
 
@@ -16,11 +17,11 @@ Design rationale, trade-offs and failure modes are in **[docs/design.md](docs/de
 
 ## Quickstart
 
-Prerequisites: Docker (with Compose v2). For running tests on the host, you also need [uv](https://docs.astral.sh/uv/).
+Prerequisites: Docker (with Compose v2). For running tests on the host, you also need [uv](https://docs.astral.sh/uv/). The service targets Python 3.12, which uv installs automatically.
 
 ```bash
 cp .env.example .env     # optional: only needed to change ports or keys
-make up                  # builds and starts api, worker, mongo, redis (waits until healthy)
+make up                  # builds and starts api, worker, beat, mongo, redis (waits until healthy)
 make demo                # walks through the flow with curl
 ```
 
@@ -52,12 +53,22 @@ All `/credits` and `/users` routes require an `X-API-Key` header.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/credits` | Body `{"user_id": str, "amount": decimal}`. Returns **202** with `task_id` and a `Location` header. Accepts an optional `Idempotency-Key` header. |
-| `GET` | `/credits/{task_id}` | Credit status: `pending` → `applied` or `failed`. |
+| `GET` | `/credits/{task_id}` | Credit status: `pending` → `applied` or `failed`. Also `redeliveries`: how many duplicate deliveries the worker safely ignored. |
 | `GET` | `/users/{user_id}` | Balance, status (`processing` / `processed`) and number of pending credits. |
 | `GET` | `/healthz` | Liveness check (no dependencies). |
 | `GET` | `/readyz` | Readiness check: pings MongoDB and Redis, returns 503 if either is down. |
 
-**Validation:** `amount` must be greater than 0 and at most 1,000,000, with at most 2 decimal places. Send it as a JSON number or a string. `user_id` may contain only `[A-Za-z0-9_-]`, up to 64 characters. Unknown fields are rejected.
+**Validation:**
+- `amount` must be greater than 0 and at most 1,000,000, with at most 2 decimal places.
+- Send `amount` as a JSON number or a plain decimal string such as `"12.50"`. Spellings like `"1_000"`, `"1E+6"` or padded strings are rejected.
+- `user_id` may contain only `[A-Za-z0-9_-]`, up to 64 characters.
+- Unknown fields are rejected, and request bodies are limited to 16 KB.
+
+**Idempotency:**
+- Keys are scoped per user.
+- Replaying a key with the same user and amount returns the original `task_id` and its current status, without enqueueing again.
+- The same key with a different amount returns 409.
+- If the original request got a 503, the key is freed, so retrying with it creates and enqueues the credit.
 
 **Money:** amounts are stored as `Decimal128` and returned as strings (`"150.00"`) so clients never see float rounding.
 
@@ -67,9 +78,16 @@ All `/credits` and `/users` routes require an `X-API-Key` header.
 |---|---|
 | 401 | Missing or invalid `X-API-Key` |
 | 404 | Unknown credit or user |
-| 409 | `Idempotency-Key` reused with a different request body |
+| 409 | `Idempotency-Key` reused for the same user with a different amount |
+| 411 / 413 | Request body has no `Content-Length`, or is larger than 16 KB |
 | 422 | Validation failed |
+| 500 | Unexpected error (details are logged, never returned) |
 | 503 | MongoDB or the queue is unavailable. Safe to retry with the same `Idempotency-Key`. |
+
+**Failure handling:**
+- **Transient MongoDB errors in the worker** (connection loss, timeouts) are retried with capped exponential backoff. If retries run out, the credit stays `pending` rather than being failed.
+- **Stuck credits:** a Celery beat job re-enqueues any credit still `pending` after 2 minutes. This covers an API crash between saving and enqueueing, lost broker messages and killed workers. Re-enqueueing is safe because applying a credit is idempotent.
+- **Other errors** mark the credit `failed`, with the stable code `processing_error`.
 
 ## Tests
 
@@ -84,10 +102,10 @@ make lint        # ruff + mypy --strict
 | Layer | What it proves |
 |---|---|
 | Unit (`tests/unit`) | Amount and user-ID validation; money formatting. |
-| Integration (`tests/integration`) | Against a real MongoDB replica set: applying the same credit twice credits once (including 8 concurrent duplicate deliveries); 50 concurrent credits sum exactly; status stays `processing` until the last credit settles; failure paths release the user; idempotency keys; API status codes, auth and the error format. |
-| End-to-end (`tests/e2e`) | API → Redis → worker → MongoDB. A task re-sent after it was applied doesn't change the balance. |
+| Integration (`tests/integration`) | Runs against a real MongoDB replica set. Applying the same credit twice credits once, including 8 concurrent duplicate deliveries. 50 concurrent credits sum exactly. Status stays `processing` until the last credit settles. Failure paths release the user. Also covers idempotency keys (including retry after 503), the worker's retry and failure policy, reconciliation, and the API's status codes, auth, size limits and error format. |
+| End-to-end (`tests/e2e`) | API → Redis → worker → MongoDB. A task re-sent after it was applied is consumed (`redeliveries` = 1) and doesn't change the balance. |
 
-CI (`.github/workflows/ci.yml`) runs lint, type checks and all three layers on every push.
+CI (`.github/workflows/ci.yml`) runs lint, type checks and all three test layers on pushes to `main` and on pull requests.
 
 ## Configuration
 
@@ -99,7 +117,12 @@ Settings come from environment variables. On the host, `.env` is also read.
 | `CREDITS_MONGO_DB` | `credits` | Database name. |
 | `CREDITS_REDIS_URL` | `redis://localhost:6379/0` | Celery broker. |
 | `CREDITS_API_KEYS` | *(empty: all requests rejected)* | Comma-separated service keys. Compose sets `dev-local-key`. |
-| `CREDITS_TASK_MAX_RETRIES` | `5` | Worker retries for transient MongoDB errors, with exponential backoff. |
+| `CREDITS_MONGO_TIMEOUT_MS` | `5000` | Upper bound for each MongoDB operation or transaction. |
+| `CREDITS_TASK_MAX_RETRIES` | `10` | Worker retries for transient MongoDB errors. |
+| `CREDITS_TASK_RETRY_BACKOFF_MAX_S` | `60` | Cap on the retry delay (exponential backoff with full jitter). |
+| `CREDITS_RECONCILE_AFTER_S` | `120` | Age at which a still-pending credit is re-enqueued. |
+| `CREDITS_RECONCILE_INTERVAL_S` | `60` | How often the reconciliation job runs. |
+| `CREDITS_MAX_BODY_BYTES` | `16384` | Largest request body accepted. |
 | `CREDITS_LOG_LEVEL` | `INFO` | Log level for the JSON logs. |
 | `MONGO_PORT` / `REDIS_PORT` / `API_PORT` | `27017` / `6379` / `8000` | Host ports Compose publishes. Change them if they clash with local services. |
 
@@ -113,8 +136,8 @@ app/
   repository.py        all persistence rules: transactions, idempotent apply
   publisher.py         enqueue abstraction (Celery implementation)
   logging.py           JSON logging (structlog)
-  api/                 FastAPI app, routes, auth, error handlers, request-id middleware
-  worker/              Celery app config and the apply_credit task
+  api/                 FastAPI app, routes, auth, health probes, error handlers, middleware
+  worker/              Celery config, apply_credit task, reconciliation job
 tests/{unit,integration,e2e}
 scripts/demo.sh
 docs/design.md
