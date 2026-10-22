@@ -6,14 +6,22 @@ import structlog
 from fastapi import APIRouter, Depends, Header, Response
 from fastapi.responses import JSONResponse
 
-from app.api.deps import ReadinessChecks, get_publisher, get_readiness_checks, get_repository
+from app.api.deps import (
+    ReadinessChecks,
+    get_publisher,
+    get_readiness_checks,
+    get_repository,
+    require_api_key,
+)
 from app.api.errors import ApiError
 from app.domain import CreditAccepted, CreditRequest, CreditView, UserId, UserView
 from app.publisher import CreditPublisher
 from app.repository import AsyncCreditRepository, IdempotencyConflictError
 
 log = structlog.get_logger(__name__)
-router = APIRouter()
+# Credits and balances require a service API key; health probes do not.
+router = APIRouter(dependencies=[Depends(require_api_key)])
+probes = APIRouter()
 
 Repo = Annotated[AsyncCreditRepository, Depends(get_repository)]
 Publisher = Annotated[CreditPublisher, Depends(get_publisher)]
@@ -67,12 +75,12 @@ async def get_user(user_id: UserId, repo: Repo) -> UserView:
     return user
 
 
-@router.get("/healthz", include_in_schema=False)
+@probes.get("/healthz", include_in_schema=False)
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/readyz", include_in_schema=False)
+@probes.get("/readyz", include_in_schema=False)
 async def readyz(
     checks: Annotated[ReadinessChecks, Depends(get_readiness_checks)],
 ) -> JSONResponse:

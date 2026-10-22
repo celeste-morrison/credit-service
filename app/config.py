@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,14 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     task_max_retries: int = 5
     log_level: str = "INFO"
+    # Comma-separated service API keys; several allow zero-downtime rotation.
+    # Empty means every authenticated route is rejected (fail closed).
+    api_keys: SecretStr = SecretStr("")
+
+    def api_key_set(self) -> frozenset[str]:
+        return frozenset(
+            k.strip() for k in self.api_keys.get_secret_value().split(",") if k.strip()
+        )
 
 
 @lru_cache

@@ -46,6 +46,8 @@ class CreditTask(Task):  # type: ignore[type-arg]
     max_retries=get_settings().task_max_retries,
 )
 def apply_credit(self: CreditTask, credit_id: str) -> str:
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(credit_id=credit_id)
     result = get_repository().apply_credit(credit_id)
-    log.info("credit.apply", credit_id=credit_id, result=result, attempt=self.request.retries)
+    log.info("credit.apply", result=result, attempt=self.request.retries)
     return result.value

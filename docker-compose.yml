@@ -4,6 +4,7 @@ x-app: &app
     CREDITS_MONGO_URL: mongodb://mongo:27017/?replicaSet=rs0
     CREDITS_REDIS_URL: redis://redis:6379/0
     CREDITS_LOG_LEVEL: ${CREDITS_LOG_LEVEL:-INFO}
+    CREDITS_API_KEYS: ${CREDITS_API_KEYS:-dev-local-key}
   depends_on:
     mongo:
       condition: service_healthy
@@ -49,7 +50,7 @@ services:
 
   api:
     <<: *app
-    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     ports:
       - "${API_PORT:-8000}:8000"
     healthcheck:

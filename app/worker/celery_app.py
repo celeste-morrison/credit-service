@@ -8,8 +8,10 @@ credit. That is safe because applying a credit is idempotent (see app.repository
 from celery import Celery
 
 from app.config import get_settings
+from app.logging import configure_logging
 
 settings = get_settings()
+configure_logging(settings.log_level)
 
 celery = Celery("credits", broker=settings.redis_url, include=["app.worker.tasks"])
 celery.conf.update(
@@ -27,4 +29,6 @@ celery.conf.update(
     # It must exceed the longest task runtime (time_limit + retry backoff).
     broker_transport_options={"visibility_timeout": 3600},
     broker_connection_retry_on_startup=True,
+    # Our JSON logs go straight to stdout instead of being re-wrapped by Celery.
+    worker_redirect_stdouts=False,
 )

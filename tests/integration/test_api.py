@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from app.api.main import create_app
 from app.repository import AsyncCreditRepository, CreditRepository
 
+API_KEY = "test-key"
+
 
 class FakePublisher:
     def __init__(self) -> None:
@@ -40,13 +42,16 @@ def app(api_repo: AsyncCreditRepository, publisher: FakePublisher) -> FastAPI:
     app.state.repository = api_repo
     app.state.publisher = publisher
     app.state.readiness_checks = {"mongo": _ok, "redis": _ok}
+    app.state.api_keys = frozenset({API_KEY, "rotated-key"})
     return app
 
 
 @pytest.fixture
 async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": API_KEY}
+    ) as c:
         yield c
 
 
@@ -161,3 +166,34 @@ async def test_health_and_readiness(client: httpx.AsyncClient, app: FastAPI) -> 
     resp = await client.get("/readyz")
     assert resp.status_code == 503
     assert resp.json()["checks"] == {"mongo": "ok", "redis": "error: ConnectionError"}
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong"}, {"X-API-Key": ""}])
+async def test_credit_routes_require_api_key(
+    app: FastAPI, publisher: FakePublisher, headers: dict[str, str]
+) -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as anon:
+        post = await anon.post("/credits", json={"user_id": "u_1", "amount": "1"}, headers=headers)
+        get = await anon.get("/users/u_1", headers=headers)
+        health = await anon.get("/healthz")
+
+    assert post.status_code == get.status_code == 401
+    assert post.json()["error"]["code"] == "unauthorized"
+    assert publisher.published == []
+    assert health.status_code == 200
+
+
+async def test_any_configured_key_is_accepted(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/users/nobody", headers={"X-API-Key": "rotated-key"})
+    assert resp.status_code == 404
+
+
+async def test_no_configured_keys_fails_closed(client: httpx.AsyncClient, app: FastAPI) -> None:
+    app.state.api_keys = frozenset()
+    assert (await client.get("/users/nobody")).status_code == 401
+
+
+async def test_response_echoes_request_id(client: httpx.AsyncClient) -> None:
+    resp = await client.get("/healthz", headers={"X-Request-ID": "req-42"})
+    assert resp.headers["x-request-id"] == "req-42"
