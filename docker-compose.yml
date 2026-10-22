@@ -4,6 +4,8 @@ x-app: &app
     CREDITS_MONGO_URL: mongodb://mongo:27017/?replicaSet=rs0
     CREDITS_REDIS_URL: redis://redis:6379/0
     CREDITS_LOG_LEVEL: ${CREDITS_LOG_LEVEL:-INFO}
+    # Local-development key only (API is published on loopback); real deployments
+    # inject keys from a secret store.
     CREDITS_API_KEYS: ${CREDITS_API_KEYS:-dev-local-key}
   depends_on:
     mongo:
@@ -52,7 +54,7 @@ services:
     <<: *app
     command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 5s

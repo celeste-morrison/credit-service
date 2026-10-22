@@ -20,10 +20,8 @@ async def request_context(
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(request_id=request_id)
     start = time.perf_counter()
-    try:
-        response = await call_next(request)
-    finally:
-        duration_ms = round((time.perf_counter() - start) * 1000, 1)
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - start) * 1000, 1)
     response.headers[REQUEST_ID_HEADER] = request_id
     if request.url.path in QUIET_PATHS:
         return response

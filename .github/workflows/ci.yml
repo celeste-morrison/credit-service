@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint and type-check
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy
+
+      - name: Start MongoDB and Redis
+        run: docker compose up -d --wait mongo redis
+
+      - name: Unit and integration tests
+        run: uv run pytest
+
+      - name: Start full stack
+        run: docker compose up -d --build --wait
+
+      - name: End-to-end tests
+        run: uv run pytest -m e2e
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --no-color
