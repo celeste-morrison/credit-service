@@ -13,7 +13,7 @@ flowchart LR
     C -- "GET /credits/{id}<br/>GET /users/{id}" --> A
 ```
 
-Design rationale, trade-offs and failure modes are in **[docs/design.md](docs/design.md)**.
+Design rationale, trade-offs and failure modes are in **[docs/design.md](docs/design.md)** ([PDF](docs/design.pdf), two pages).
 
 ## Quickstart
 
