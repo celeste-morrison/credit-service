@@ -8,7 +8,7 @@ from uuid import uuid4
 import structlog
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api.errors import error_response
 
@@ -22,13 +22,22 @@ QUIET_PATHS = frozenset({"/healthz", "/readyz"})
 """Probe paths that are not access-logged; orchestrators hit them every few seconds."""
 
 
+class _BodyTooLargeError(Exception):
+    """Raised inside the receive channel once a body passes the size limit."""
+
+
 class BodySizeLimit:
-    """Reject request bodies larger than ``max_bytes`` before any work is done on them.
+    """Cap request bodies at ``max_bytes`` before any work is done on them.
 
     Runs before routing, so oversized bodies are refused before authentication
-    or JSON parsing. The server enforces ``Content-Length`` framing, so the
-    declared length is trusted: larger bodies get 413, and chunked bodies,
-    which declare no length, get 411. JSON clients always send a length.
+    or JSON parsing. Two layers:
+
+    1. Headers: a declared ``Content-Length`` above the limit gets 413, and a
+       body sent with any ``Transfer-Encoding`` but no ``Content-Length`` gets
+       411. JSON clients always send a length.
+    2. Byte counting: the receive channel counts body bytes and stops reading
+       once the limit is passed, whatever the headers said. The app's own
+       response is discarded and 413 is sent instead.
 
     Args:
         app: The wrapped ASGI app.
@@ -46,24 +55,59 @@ class BodySizeLimit:
             scope: The ASGI connection scope.
             receive: The ASGI receive channel.
             send: The ASGI send channel.
-        """
-        if scope["type"] == "http":
-            rejection = self._rejection(dict(scope["headers"]))
-            if rejection is not None:
-                await rejection(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
 
-    def _rejection(self, headers: dict[bytes, bytes]) -> JSONResponse | None:
-        """Return the error response for an unacceptable body, or ``None`` to proceed."""
+        Raises:
+            Exception: Anything the wrapped app raises, unless the body overflowed.
+        """
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        rejection = self._header_rejection(dict(scope["headers"]))
+        if rejection is not None:
+            await rejection(scope, receive, send)
+            return
+
+        received = 0
+        overflowed = False
+
+        async def counted_receive() -> Message:
+            nonlocal received, overflowed
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    overflowed = True
+                    raise _BodyTooLargeError
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            if not overflowed:
+                await send(message)
+
+        try:
+            await self.app(scope, counted_receive, guarded_send)
+        except Exception:
+            if not overflowed:
+                raise
+        if overflowed:
+            await _too_large()(scope, receive, send)
+
+    def _header_rejection(self, headers: dict[bytes, bytes]) -> JSONResponse | None:
+        """Return the error response for unacceptable body headers, or ``None``."""
         declared = headers.get(b"content-length")
         if declared is None:
-            if b"chunked" in headers.get(b"transfer-encoding", b""):
+            if b"transfer-encoding" in headers:
                 return error_response(411, "length_required", "Content-Length is required")
             return None
         if not declared.isdigit() or int(declared) > self.max_bytes:
-            return error_response(413, "payload_too_large", "Request body too large")
+            return _too_large()
         return None
+
+
+def _too_large() -> JSONResponse:
+    """Build the 413 response."""
+    return error_response(413, "payload_too_large", "Request body too large")
 
 
 def _request_id(request: Request) -> str:
