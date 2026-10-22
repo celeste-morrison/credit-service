@@ -233,6 +233,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "pydantic-settings" },
     { name = "pymongo" },
+    { name = "redis" },
     { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -253,6 +254,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pymongo", specifier = ">=4.10" },
+    { name = "redis", specifier = ">=5.2" },
     { name = "structlog", specifier = ">=24.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
