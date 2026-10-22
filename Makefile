@@ -1,4 +1,9 @@
 .DEFAULT_GOAL := help
+
+# Load local overrides (ports, URLs) for tests and scripts.
+-include .env
+export
+
 .PHONY: help install deps up down clean logs lint format test test-unit test-e2e demo
 
 help: ## Show available targets
@@ -35,7 +40,7 @@ test-unit: ## Unit tests (no services needed)
 	uv run pytest tests/unit
 
 test: deps ## Unit + integration tests
-	uv run pytest -m "not e2e"
+	uv run pytest
 
 test-e2e: up ## End-to-end tests against the running stack
 	uv run pytest -m e2e
