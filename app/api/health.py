@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
-type Check = Callable[[], Awaitable[object]]
+Check = Callable[[], Awaitable[object]]
 
 
 class Readiness:

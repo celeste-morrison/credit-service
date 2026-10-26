@@ -23,7 +23,7 @@ from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypeVar
 from uuid import uuid4
 
 import pymongo
@@ -37,8 +37,10 @@ from app.config import DEFAULT_CLIENT
 from app.db import CREDITS, USERS, Doc
 from app.domain import CreditRequest, CreditStatus, CreditView, UserStatus, UserView
 
-type AsyncTxn[T] = Callable[[AsyncClientSession], Coroutine[Any, Any, T]]
-type SyncTxn[T] = Callable[[ClientSession], T]
+T = TypeVar("T")
+
+AsyncTxn = Callable[[AsyncClientSession], Coroutine[Any, Any, T]]
+SyncTxn = Callable[[ClientSession], T]
 
 UPSERT_ATTEMPTS = 3
 """Attempts at creating a credit when first-time upserts of one user race."""
@@ -295,7 +297,7 @@ class AsyncCreditRepository:
             raise IdempotencyConflictError(key)
         return to_credit_view(doc)
 
-    async def _run[T](self, txn: AsyncTxn[T]) -> T:
+    async def _run(self, txn: AsyncTxn[T]) -> T:
         """Run ``txn`` in a transaction bounded by the operation timeout."""
         with pymongo.timeout(self._timeout_s):
             async with self._client.start_session() as session:
@@ -421,7 +423,7 @@ class CreditRepository:
             cursor = self._credits.find(query, {"_id": 1}).sort("created_at").limit(limit)
             return [doc["_id"] for doc in cursor]
 
-    def _run[T](self, txn: SyncTxn[T]) -> T:
+    def _run(self, txn: SyncTxn[T]) -> T:
         """Run ``txn`` in a transaction bounded by the operation timeout."""
         with pymongo.timeout(self._timeout_s), self._client.start_session() as session:
             return session.with_transaction(txn)
