@@ -15,6 +15,8 @@ flowchart LR
 
 Design rationale, trade-offs and failure modes are in **[docs/design.md](docs/design.md)** ([PDF](docs/design.pdf), two pages).
 
+**Video walkthrough:** [Loom](https://www.loom.com/share/f9ee66538ca5488dbf2b74332b6b4916), with a demo, a code tour, tests and trade-offs.
+
 ## Quickstart
 
 Prerequisites: Docker (with Compose v2). For running tests on the host, you also need [uv](https://docs.astral.sh/uv/). The service supports Python 3.11+. Tests on the host run on 3.11, which uv installs automatically; the container image uses 3.12.
