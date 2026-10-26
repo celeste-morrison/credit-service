@@ -17,7 +17,7 @@ Design rationale, trade-offs and failure modes are in **[docs/design.md](docs/de
 
 ## Quickstart
 
-Prerequisites: Docker (with Compose v2). For running tests on the host, you also need [uv](https://docs.astral.sh/uv/). The service targets Python 3.12, which uv installs automatically.
+Prerequisites: Docker (with Compose v2). For running tests on the host, you also need [uv](https://docs.astral.sh/uv/). The service supports Python 3.11+. Tests on the host run on 3.11, which uv installs automatically; the container image uses 3.12.
 
 ```bash
 cp .env.example .env     # optional: only needed to change ports or keys
@@ -45,6 +45,18 @@ curl -s localhost:8000/credits/<task_id> -H "X-API-Key: $KEY"
 ```
 
 `make down` stops the stack. `make clean` also deletes the data volumes.
+
+## How this maps to the exercise
+
+| Exercise step | Where |
+|---|---|
+| `POST /credits` validates `user_id` and `amount` | `app/api/routes.py`, `app/domain.py` |
+| Sets the user's status to `processing` and publishes a task | `create_pending_credit` in `app/repository.py`, then `app/publisher.py` |
+| Returns `202 Accepted` with a task ID | The task ID is also the Celery task ID and the credit's ID |
+| Worker adds `amount` to `balance`, creating the field if missing | `apply_credit` in `app/repository.py` |
+| Worker sets the status to `processed` | Same transaction as the balance update |
+
+One interpretation to note: the user's `status` becomes `processed` once **all** of that user's credits have been applied, not after each one. If two credits for a user are in flight and the first finishes, a literal reading would show `processed` while money is still pending. Tracking a per-user count of pending credits keeps the status honest. Stored documents match the example's shape (`user_id`, `balance`, `status`), with `pending_credits` and timestamps added; `balance` is a `Decimal128` so it stays exact.
 
 ## API
 
