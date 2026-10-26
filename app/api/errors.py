@@ -14,12 +14,70 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from pymongo.errors import PyMongoError
 from starlette.exceptions import HTTPException
 
 from app.db import is_transient_error
 
 log = structlog.get_logger(__name__)
+
+
+class ErrorDetail(BaseModel):
+    """One validation problem: where it is, what is wrong, and its type."""
+
+    loc: list[str | int]
+    msg: str
+    type: str
+
+
+class ErrorBody(BaseModel):
+    """A stable error code and a human-readable message."""
+
+    code: str
+    message: str
+    details: list[ErrorDetail] | None = None
+
+
+class ErrorResponse(BaseModel):
+    """The JSON body of every error response."""
+
+    error: ErrorBody
+
+
+ERROR_DESCRIPTIONS: dict[int, str] = {
+    401: "Missing or invalid `X-API-Key`.",
+    404: "Not found.",
+    409: "`Idempotency-Key` already used for this user with a different amount.",
+    411: "Request body sent without `Content-Length`.",
+    413: "Request body larger than the limit (16 KB by default).",
+    422: "Validation failed. `details` lists each problem.",
+    429: "Client is over its rate limit. `Retry-After` gives the seconds to wait.",
+    500: "Unexpected error. Details are logged, never returned.",
+    503: "MongoDB or the queue is unavailable. Safe to retry with the same `Idempotency-Key`.",
+}
+
+
+def error_responses(*codes: int) -> dict[int | str, dict[str, Any]]:
+    """Describe error responses for the OpenAPI schema.
+
+    Args:
+        codes: HTTP status codes the route can return.
+
+    Returns:
+        A ``responses`` mapping for a FastAPI route or router.
+    """
+    responses: dict[int | str, dict[str, Any]] = {}
+    for code in codes:
+        responses[code] = {"model": ErrorResponse, "description": ERROR_DESCRIPTIONS[code]}
+        if code == 429:
+            responses[code]["headers"] = {
+                "Retry-After": {
+                    "description": "Seconds until the rate-limit window resets.",
+                    "schema": {"type": "integer"},
+                }
+            }
+    return responses
 
 
 class ApiError(Exception):

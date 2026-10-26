@@ -16,6 +16,7 @@ from app.api.main import create_app
 from app.api.ratelimit import RateLimiter
 from app.config import Settings, get_settings
 from app.db import CREDITS, Doc
+from app.domain import CreditRequest
 from app.repository import AsyncCreditRepository, CreditRepository
 from tests.integration.helpers import fetch_user
 
@@ -387,3 +388,22 @@ def test_api_docs_can_be_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
         get_settings.cache_clear()
 
     assert app.openapi_url == "/openapi.json"
+
+
+def test_openapi_schema_matches_the_api() -> None:
+    schema = create_app().openapi()
+    post = schema["paths"]["/credits"]["post"]
+
+    example = post["requestBody"]["content"]["application/json"]["examples"]["credit"]["value"]
+    CreditRequest.model_validate(example)
+
+    error_ref = {"$ref": "#/components/schemas/ErrorResponse"}
+    for code in ("401", "409", "413", "422", "429", "503"):
+        assert post["responses"][code]["content"]["application/json"]["schema"] == error_ref
+    assert "Location" in post["responses"]["202"]["headers"]
+    assert "HTTPValidationError" not in schema["components"]["schemas"]
+
+    for path in schema["paths"].values():
+        for operation in path.values():
+            assert "Args:" not in operation.get("description", "")
+            assert operation["tags"]

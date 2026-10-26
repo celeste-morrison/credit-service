@@ -8,11 +8,11 @@ from typing import Annotated
 
 import anyio
 import structlog
-from fastapi import APIRouter, Depends, Header, Response
+from fastapi import APIRouter, Body, Depends, Header, Path, Response
 from fastapi.responses import JSONResponse
 
 from app.api.deps import ClientId, enforce_rate_limit, get_publisher, get_readiness, get_repository
-from app.api.errors import ApiError
+from app.api.errors import ApiError, error_responses
 from app.api.health import Readiness
 from app.domain import CreditAccepted, CreditRequest, CreditView, UserId, UserView
 from app.publisher import CreditPublisher
@@ -20,21 +20,58 @@ from app.repository import AsyncCreditRepository, IdempotencyConflictError
 
 log = structlog.get_logger(__name__)
 
-router = APIRouter(dependencies=[Depends(enforce_rate_limit)])
+router = APIRouter(
+    dependencies=[Depends(enforce_rate_limit)],
+    responses=error_responses(401, 422, 429, 500, 503),
+)
 probes = APIRouter()
 
 Repo = Annotated[AsyncCreditRepository, Depends(get_repository)]
 Publisher = Annotated[CreditPublisher, Depends(get_publisher)]
 
+CREDIT_EXAMPLES = {
+    "credit": {
+        "summary": "Credit 150.00 to u_123",
+        "value": {"user_id": "u_123", "amount": "150.00"},
+    }
+}
 
-@router.post("/credits", status_code=202, response_model=CreditAccepted)
+ACCEPTED_RESPONSE = {
+    "description": "Credit accepted; it is applied asynchronously.",
+    "headers": {
+        "Location": {
+            "description": "Path to poll for this credit's status.",
+            "schema": {"type": "string", "example": "/credits/4f6c1b0e-..."},
+        }
+    },
+}
+
+
+@router.post(
+    "/credits",
+    status_code=202,
+    response_model=CreditAccepted,
+    summary="Credit a user's balance",
+    tags=["credits"],
+    responses={202: ACCEPTED_RESPONSE, **error_responses(409, 411, 413)},
+)
 async def create_credit(
-    body: CreditRequest,
+    body: Annotated[CreditRequest, Body(openapi_examples=CREDIT_EXAMPLES)],
     response: Response,
     repo: Repo,
     publisher: Publisher,
     client_id: ClientId,
-    idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            min_length=1,
+            max_length=255,
+            description=(
+                "Optional. Retrying with the same key, user and amount returns the "
+                "original credit instead of creating a new one. Honoured for 24 hours."
+            ),
+        ),
+    ] = None,
 ) -> CreditAccepted:
     """Accept a credit for asynchronous processing.
 
@@ -45,6 +82,7 @@ async def create_credit(
     original credit and its current status without enqueueing again. If the
     original could not be enqueued (503), the key is freed and the retry creates
     a new credit.
+    \f
 
     Args:
         body: The credit to apply.
@@ -82,9 +120,19 @@ async def create_credit(
     return CreditAccepted(task_id=credit.task_id, status=credit.status)
 
 
-@router.get("/credits/{task_id}", response_model=CreditView)
-async def get_credit(task_id: str, repo: Repo) -> CreditView:
-    """Return a credit's status.
+@router.get(
+    "/credits/{task_id}",
+    response_model=CreditView,
+    summary="Get a credit's status",
+    tags=["credits"],
+    responses=error_responses(404),
+)
+async def get_credit(
+    task_id: Annotated[str, Path(description="The `task_id` returned by `POST /credits`.")],
+    repo: Repo,
+) -> CreditView:
+    """Return a credit's status: ``pending``, then ``applied`` or ``failed``.
+    \f
 
     Args:
         task_id: The id returned by ``POST /credits``.
@@ -102,9 +150,22 @@ async def get_credit(task_id: str, repo: Repo) -> CreditView:
     return credit
 
 
-@router.get("/users/{user_id}", response_model=UserView)
-async def get_user(user_id: UserId, repo: Repo) -> UserView:
+@router.get(
+    "/users/{user_id}",
+    response_model=UserView,
+    summary="Get a user's balance and status",
+    tags=["users"],
+    responses=error_responses(404),
+)
+async def get_user(
+    user_id: Annotated[UserId, Path(openapi_examples={"u_123": {"value": "u_123"}})],
+    repo: Repo,
+) -> UserView:
     """Return a user's balance and status.
+
+    ``status`` is ``processing`` while any of the user's credits is pending, and
+    ``processed`` once all have settled.
+    \f
 
     Args:
         user_id: The user id.

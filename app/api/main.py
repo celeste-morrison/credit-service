@@ -18,6 +18,24 @@ from app.logging import configure_logging
 from app.publisher import CeleryCreditPublisher
 from app.repository import AsyncCreditRepository
 
+API_DESCRIPTION = """
+Credits a user's balance asynchronously. `POST /credits` returns `202 Accepted`
+with a `task_id`; a worker then applies the credit. Poll `GET /credits/{task_id}`
+or `GET /users/{user_id}` for progress.
+
+**Authentication:** send your key in the `X-API-Key` header (use **Authorize** above).
+
+**Money:** send `amount` as a JSON number or a decimal string such as `"12.50"`.
+Amounts are returned as strings so they are never rounded.
+
+**Errors:** every error has the shape `{"error": {"code", "message", "details"?}}`.
+"""
+
+OPENAPI_TAGS = [
+    {"name": "credits", "description": "Submit credits and check their status."},
+    {"name": "users", "description": "Read a user's balance and processing status."},
+]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -66,6 +84,8 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Credit Service",
         version="0.1.0",
+        description=API_DESCRIPTION,
+        openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
         docs_url="/docs" if docs else None,
         redoc_url="/redoc" if docs else None,
