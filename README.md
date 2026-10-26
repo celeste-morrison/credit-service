@@ -20,10 +20,14 @@ Design rationale, trade-offs and failure modes are in **[docs/design.md](docs/de
 Prerequisites: Docker (with Compose v2). For running tests on the host, you also need [uv](https://docs.astral.sh/uv/). The service supports Python 3.11+. Tests on the host run on 3.11, which uv installs automatically; the container image uses 3.12.
 
 ```bash
+git clone https://github.com/celeste-morrison/credit-service.git
+cd credit-service
 cp .env.example .env     # optional: only needed to change ports or keys
 make up                  # builds and starts api, worker, beat, mongo, redis (waits until healthy)
 make demo                # walks through the flow with curl
 ```
+
+**Port already in use?** Compose publishes the API on 8000, MongoDB on 27017 and Redis on 6379. If `make up` fails with `port is already allocated`, something else is using one of them, often a local Redis. Copy `.env.example` to `.env`, change `API_PORT`, `MONGO_PORT` or `REDIS_PORT`, and run `make up` again. If you change `API_PORT`, use that port in the URLs below as well. If you change `MONGO_PORT` or `REDIS_PORT`, update the port in `CREDITS_MONGO_URL` or `CREDITS_REDIS_URL` in `.env` too, so `make test` can reach them.
 
 Interactive API docs: <http://localhost:8000/docs>. Use the **Authorize** button with the key `dev-local-key`. The docs are on in the local Compose stack and off by default elsewhere (`CREDITS_DOCS_ENABLED`).
 
